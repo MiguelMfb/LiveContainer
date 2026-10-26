@@ -1,0 +1,2482 @@
+diff --git a/AltStore/Settings/AnisetteServerList.swift b/AltStore/Settings/AnisetteServerList.swift
+index b9148a8..1796a3e 100644
+--- a/AltStore/Settings/AnisetteServerList.swift
++++ b/AltStore/Settings/AnisetteServerList.swift
+@@ -12,7 +12,8 @@ import SideSign
+ 
+ private typealias SUIButton = SwiftUI.Button
+ 
+-// MARK: - AnisetteServerData
++// MARK: - Anisette Server Data
++
+ struct AnisetteServerData: Codable {
+     let servers: [Server]
+     let oda: ODAValue?
+@@ -29,28 +30,38 @@ struct AnisetteServerData: Codable {
+ 
+     init(from decoder: Decoder) throws {
+         let container = try decoder.container(keyedBy: CodingKeys.self)
+-        self.servers = (try? container.decode([Server].self, forKey: .servers)) ?? []
+-        self.oda = try? container.decodeIfPresent(ODAValue.self, forKey: .oda)
++        servers = (try? container.decode([Server].self, forKey: .servers)) ?? []
++        oda = try? container.decodeIfPresent(ODAValue.self, forKey: .oda)
+     }
+ }
+ 
+ // MARK: - Server
++
+ struct Server: Codable, Identifiable, Hashable {
+     var id: String { address }
++
+     var name: String
+     var address: String
+ }
++
++// MARK: - Anisette View Model
++
++@MainActor
+ final class AnisetteViewModel: ObservableObject {
+     static let defaultSource = AnisetteServersManager.defaultSource
+ 
++    private static let customServersDefaultsKey = "customAnisetteServers"
++
+     @Published var source: String = defaultSource
+     @Published var items: [AnisetteServerItem] = []
+-    @Published var showHiddenServers: Bool = false
+-    @Published var isOfflineMode: Bool = false
+-    @Published var importedFileName: String? = nil
+-    @Published var isLoading: Bool = false
+-    @Published var errorMessage: String? = nil
+-    @Published var isNoInternet: Bool = false
++    @Published var showHiddenServers = false
++    @Published var isOfflineMode = false
++    @Published var importedFileName: String?
++    @Published var isLoading = false
++    @Published var errorMessage: String?
++    @Published var isNoInternet = false
++
++    @Published private(set) var customServerAddresses: Set<String> = []
+ 
+     var hasHiddenItems: Bool {
+         items.contains(where: \.isHidden)
+@@ -60,144 +71,317 @@ final class AnisetteViewModel: ObservableObject {
+         showHiddenServers ? items : items.filter { !$0.isHidden }
+     }
+ 
++    // MARK: Custom Server Persistence
++
++    private static func loadSavedCustomServers() -> [Server] {
++        guard let data = UserDefaults.standard.data(
++            forKey: Self.customServersDefaultsKey
++        ) else {
++            return []
++        }
++
++        return (try? JSONDecoder().decode([Server].self, from: data)) ?? []
++    }
++
++    private func saveCustomServers(_ servers: [Server]) {
++        guard let data = try? JSONEncoder().encode(servers) else {
++            return
++        }
++
++        UserDefaults.standard.set(
++            data,
++            forKey: Self.customServersDefaultsKey
++        )
++
++        customServerAddresses = Set(servers.map(\.address))
++    }
++
++    /// Adds saved custom servers to a catalog without duplicating their URLs.
++    private func mergingCustomServers(
++        into catalog: [AnisetteServerItem]
++    ) -> [AnisetteServerItem] {
++        let savedServers = Self.loadSavedCustomServers()
++        let savedAddresses = Set(savedServers.map(\.address))
++
++        customServerAddresses = savedAddresses
++
++        let customItems = savedServers.map { server in
++            AnisetteServerItem(
++                name: server.name,
++                address: server.address,
++                isHidden: false
++            )
++        }
++
++        return customItems + catalog.filter {
++            !savedAddresses.contains($0.address)
++        }
++    }
++
++    // MARK: Initialization
++
+     init() {
+-        let customSource = UserDefaults.standard.menuAnisetteList
+-        if !customSource.isEmpty {
+-            self.source = customSource
++        let savedSource = UserDefaults.standard.menuAnisetteList
++
++        if !savedSource.isEmpty {
++            source = savedSource
+         }
++
++        customServerAddresses = Set(
++            Self.loadSavedCustomServers().map(\.address)
++        )
++
+         Task { @MainActor in
+-            self.isOfflineMode = await AnisetteServersManager.shared.isOfflineMode
+-            self.importedFileName = await AnisetteServersManager.shared.importedFileName
+-            if self.isOfflineMode || self.source == AnisetteViewModel.defaultSource {
+-                self.items = await AnisetteServersManager.shared.loadLocalServers()
++            isOfflineMode =
++                await AnisetteServersManager.shared.isOfflineMode
++
++            importedFileName =
++                await AnisetteServersManager.shared.importedFileName
++
++            let localServers =
++                await AnisetteServersManager.shared.loadLocalServers()
++
++            if isOfflineMode || source == Self.defaultSource {
++                items = mergingCustomServers(into: localServers)
++            } else if !localServers.isEmpty {
++                // Keep the saved list available while the remote catalog loads.
++                items = mergingCustomServers(into: localServers)
+             }
+         }
+     }
+ 
+-    @MainActor
++    // MARK: Fetch Servers
++
+     @discardableResult
+-    func fetchServers(forceRemote: Bool = false) async -> Result<[AnisetteServerItem], Error> {
++    func fetchServers(
++        forceRemote: Bool = false
++    ) async -> Result<[AnisetteServerItem], Error> {
+         isLoading = true
+         defer { isLoading = false }
+ 
+-        let isOffline = await AnisetteServersManager.shared.isOfflineMode
+-        let filename = await AnisetteServersManager.shared.importedFileName
+-        self.isOfflineMode = isOffline
+-        self.importedFileName = filename
++        let offline =
++            await AnisetteServersManager.shared.isOfflineMode
++
++        let filename =
++            await AnisetteServersManager.shared.importedFileName
++
++        isOfflineMode = offline
++        importedFileName = filename
+ 
+-        if isOffline && !forceRemote {
+-            let offline = await AnisetteServersManager.shared.loadLocalServers()
+-            self.items = offline
+-            self.errorMessage = nil
+-            return .success(offline)
++        if offline && !forceRemote {
++            let localServers =
++                await AnisetteServersManager.shared.loadLocalServers()
++
++            let mergedItems = mergingCustomServers(into: localServers)
++
++            items = mergedItems
++            errorMessage = nil
++            isNoInternet = false
++
++            return .success(mergedItems)
+         }
+ 
+         do {
+-            let merged = try await withThrowingTaskGroup(of: [AnisetteServerItem].self) { group in
++            let sourceURL = source
++
++            let catalog = try await withThrowingTaskGroup(
++                of: [AnisetteServerItem].self
++            ) { group in
+                 group.addTask {
+-                    return try await AnisetteServersManager.shared.syncWithRemote(sourceURLString: self.source, forceRemote: forceRemote)
++                    try await AnisetteServersManager.shared.syncWithRemote(
++                        sourceURLString: sourceURL,
++                        forceRemote: forceRemote
++                    )
+                 }
++
+                 group.addTask {
+-                    try await Task.sleep(nanoseconds: 5_000_000_000)
+-                    throw URLError(.timedOut, userInfo: [NSLocalizedDescriptionKey: "Server list fetch timed out after 5 seconds."])
++                    try await Task.sleep(
++                        nanoseconds: 5_000_000_000
++                    )
++
++                    throw URLError(
++                        .timedOut,
++                        userInfo: [
++                            NSLocalizedDescriptionKey:
++                                "Server list fetch timed out after 5 seconds."
++                        ]
++                    )
+                 }
++
+                 guard let result = try await group.next() else {
+                     throw URLError(.timedOut)
+                 }
++
+                 group.cancelAll()
+                 return result
+             }
+-            self.errorMessage = nil
+-            self.items = merged
+-            debugLog("AnisetteViewModel: Server list sync completed for sourceURL: \(self.source)")
+-            return .success(merged)
++
++            let mergedItems = mergingCustomServers(into: catalog)
++
++            items = mergedItems
++            errorMessage = nil
++            isNoInternet = false
++
++            debugLog(
++                "AnisetteViewModel: Server list sync completed for sourceURL: \(source)"
++            )
++
++            return .success(mergedItems)
+         } catch {
+-            let isOnline = await AnisetteServersManager.shared.isPublicInternetAvailable()
+-            let msg: String
++            let isOnline =
++                await AnisetteServersManager.shared.isPublicInternetAvailable()
++
++            let message: String
++
+             if !isOnline {
+-                msg = "No Internet Connection. Please check your Wi-Fi or cellular network."
+-            } else if let urlErr = error as? URLError, urlErr.code == .timedOut {
+-                msg = "Connection timed out (5s limit) while reaching '\(self.source)'."
++                message =
++                    "No Internet Connection. Please check your Wi-Fi or cellular network."
++            } else if let urlError = error as? URLError,
++                      urlError.code == .timedOut {
++                message =
++                    "Connection timed out (5s limit) while reaching '\(source)'."
+             } else {
+-                msg = "Failed to fetch catalog from '\(self.source)': \(error.localizedDescription)"
++                message =
++                    "Failed to fetch catalog from '\(source)': \(error.localizedDescription)"
+             }
+ 
+-            self.isNoInternet = !isOnline
+-            self.errorMessage = msg
+-            self.items = []
+-            debugLog("[AnisetteViewModel] Server list sync Failed for URL '\(self.source)' | Internet Online: \(isOnline) | Error: \(error)")
++            isNoInternet = !isOnline
++            errorMessage = message
++
++            // Preserve current entries and restore any saved custom servers.
++            items = mergingCustomServers(into: items)
++
++            debugLog(
++                "[AnisetteViewModel] Server list sync failed for URL '\(source)' | Internet Online: \(isOnline) | Error: \(error)"
++            )
++
+             return .failure(error)
+         }
+     }
+ 
+-    @MainActor
++    // MARK: Import / Export
++
+     func importData(_ data: Data, filename: String) async {
+         isLoading = true
+         errorMessage = nil
+         defer { isLoading = false }
+ 
+         do {
+-            let imported = try await AnisetteServersManager.shared.importFromData(data: data, filename: filename)
+-            self.items = imported
+-            self.isOfflineMode = true
+-            self.importedFileName = filename
+-            debugLog("AnisetteViewModel: Imported servers from data: \(filename)")
++            let imported =
++                try await AnisetteServersManager.shared.importFromData(
++                    data: data,
++                    filename: filename
++                )
++
++            items = mergingCustomServers(into: imported)
++            isOfflineMode = true
++            importedFileName = filename
++
++            debugLog(
++                "AnisetteViewModel: Imported servers from data: \(filename)"
++            )
+         } catch {
+-            self.errorMessage = "Failed to import file: \(error.localizedDescription)"
++            errorMessage =
++                "Failed to import file: \(error.localizedDescription)"
++
+             debugLog("AnisetteViewModel: Import error: \(error)")
+         }
+     }
+ 
+     func exportCatalog(unmodified: Bool = false) async -> URL? {
+-        guard let data = await AnisetteServersManager.shared.exportCatalogData(unmodified: unmodified) else { return nil }
+-        let baseName = (await AnisetteServersManager.shared.importedFileName) ?? "anisette-servers.json"
+-        let nameWithoutExt = (baseName as NSString).deletingPathExtension
+-        let ext = (baseName as NSString).pathExtension.isEmpty ? "json" : (baseName as NSString).pathExtension
++        guard let data =
++            await AnisetteServersManager.shared.exportCatalogData(
++                unmodified: unmodified
++            )
++        else {
++            return nil
++        }
++
++        let baseName =
++            (await AnisetteServersManager.shared.importedFileName)
++            ?? "anisette-servers.json"
++
++        let nameWithoutExtension =
++            (baseName as NSString).deletingPathExtension
++
++        let extensionName =
++            (baseName as NSString).pathExtension.isEmpty
++            ? "json"
++            : (baseName as NSString).pathExtension
++
+         let suffix = unmodified ? "-unmodified" : "-customized"
+-        let filename = "\(nameWithoutExt)\(suffix).\(ext)"
++        let filename =
++            "\(nameWithoutExtension)\(suffix).\(extensionName)"
++
++        let temporaryURL = FileManager.default.temporaryDirectory
++            .appendingPathComponent(filename)
+ 
+-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+-        try? data.write(to: tempURL, options: .atomic)
+-        return tempURL
++        do {
++            try data.write(to: temporaryURL, options: .atomic)
++            return temporaryURL
++        } catch {
++            errorMessage =
++                "Failed to export catalog: \(error.localizedDescription)"
++            return nil
++        }
+     }
+ 
+-    @MainActor
+     func resetToOriginalState() async {
+         isLoading = true
+         errorMessage = nil
+         defer { isLoading = false }
+ 
+         do {
+-            let resetItems = try await AnisetteServersManager.shared.resetToOriginalState()
+-            self.items = resetItems
+-            debugLog("AnisetteViewModel: Reset catalog to original uncustomized state.")
++            let resetItems =
++                try await AnisetteServersManager.shared.resetToOriginalState()
++
++            items = mergingCustomServers(into: resetItems)
++
++            debugLog(
++                "AnisetteViewModel: Reset catalog to original uncustomized state."
++            )
+         } catch {
+-            self.errorMessage = "Failed to reset: \(error.localizedDescription)"
++            errorMessage =
++                "Failed to reset: \(error.localizedDescription)"
++
+             debugLog("AnisetteViewModel: Reset error: \(error)")
+         }
+     }
+ 
+-    @MainActor
+     func clearImportedFile() async {
+         await AnisetteServersManager.shared.clearOfflineFileMode()
+-        self.isOfflineMode = false
+-        self.importedFileName = nil
+-        self.source = AnisetteViewModel.defaultSource
++
++        isOfflineMode = false
++        importedFileName = nil
++        source = Self.defaultSource
++        UserDefaults.standard.menuAnisetteList = Self.defaultSource
++
+         await fetchServers(forceRemote: true)
+     }
+ 
++    // MARK: Reordering
++
+     func moveItems(from source: IndexSet, to destination: Int) {
+         if showHiddenServers {
+             items.move(fromOffsets: source, toOffset: destination)
+         } else {
+-            let visibleIndices = items.enumerated().compactMap { index, item in
++            let visibleIndices = items.enumerated().compactMap {
++                index, item in
+                 item.isHidden ? nil : index
+             }
+ 
+-            guard !visibleIndices.isEmpty else { return }
++            guard !visibleIndices.isEmpty else {
++                return
++            }
++
++            let actualSourceIndices = source.compactMap { index in
++                index < visibleIndices.count
++                    ? visibleIndices[index]
++                    : nil
++            }
+ 
+-            let actualSourceIndices = source.compactMap { $0 < visibleIndices.count ? visibleIndices[$0] : nil }
+             let actualDestinationIndex: Int
++
+             if destination >= visibleIndices.count {
+                 actualDestinationIndex = items.count
+             } else {
+@@ -205,48 +389,235 @@ final class AnisetteViewModel: ObservableObject {
+             }
+ 
+             let movedItems = actualSourceIndices.map { items[$0] }
++
+             for index in actualSourceIndices.sorted(by: >) {
+                 items.remove(at: index)
+             }
+ 
+-            var targetIndex = actualDestinationIndex
+-            let removedBeforeTarget = actualSourceIndices.filter { $0 < actualDestinationIndex }.count
+-            targetIndex -= removedBeforeTarget
++            let removedBeforeTarget = actualSourceIndices.filter {
++                $0 < actualDestinationIndex
++            }.count
++
++            var targetIndex =
++                actualDestinationIndex - removedBeforeTarget
++
+             targetIndex = max(0, min(items.count, targetIndex))
+ 
+             items.insert(contentsOf: movedItems, at: targetIndex)
+         }
+ 
++        persistLocalServers()
++    }
++
++    // MARK: Hide / Unhide Built-in Servers
++
++    func toggleHide(item: AnisetteServerItem) {
++        guard let index = items.firstIndex(
++            where: { $0.address == item.address }
++        ) else {
++            return
++        }
++
++        items[index].isHidden.toggle()
++        persistLocalServers()
++    }
++
++    // MARK: Add Custom Server
++
++    @discardableResult
++    func addCustomServer(
++        name: String,
++        address: String
++    ) -> String? {
++        var urlString = address.trimmingCharacters(
++            in: .whitespacesAndNewlines
++        )
++
++        guard !urlString.isEmpty else {
++            return "Enter a server URL."
++        }
++
++        if !urlString.contains("://") {
++            urlString = "https://" + urlString
++        }
++
++        guard
++            let url = URL(string: urlString),
++            let host = url.host,
++            !host.isEmpty,
++            let scheme = url.scheme?.lowercased(),
++            scheme == "https" || scheme == "http"
++        else {
++            return "Invalid URL. Use a valid HTTP or HTTPS server URL."
++        }
++
++        let finalAddress = url.absoluteString
++
++        guard !items.contains(where: {
++            $0.address.caseInsensitiveCompare(finalAddress) == .orderedSame
++        }) else {
++            return "That server is already in the list."
++        }
++
++        let trimmedName = name.trimmingCharacters(
++            in: .whitespacesAndNewlines
++        )
++
++        let server = Server(
++            name: trimmedName.isEmpty ? host : trimmedName,
++            address: finalAddress
++        )
++
++        var savedServers = Self.loadSavedCustomServers()
++
++        guard !savedServers.contains(where: {
++            $0.address.caseInsensitiveCompare(finalAddress) == .orderedSame
++        }) else {
++            return "That server is already in the list."
++        }
++
++        savedServers.append(server)
++        saveCustomServers(savedServers)
++
++        let item = AnisetteServerItem(
++            name: server.name,
++            address: server.address,
++            isHidden: false
++        )
++
++        items.insert(item, at: 0)
++
++        UserDefaults.standard.menuAnisetteURL = finalAddress
++        persistLocalServers()
++
++        return nil
++    }
++
++    // MARK: Remove Custom Server
++
++    /// Removes a custom server and returns the URL that remains selected.
++    @discardableResult
++    func removeCustomServer(item: AnisetteServerItem) -> String {
++        guard customServerAddresses.contains(item.address) else {
++            return UserDefaults.standard.menuAnisetteURL
++        }
++
++        let remainingServers = Self.loadSavedCustomServers().filter {
++            $0.address != item.address
++        }
++
++        saveCustomServers(remainingServers)
++
++        items.removeAll {
++            $0.address == item.address
++        }
++
++        let defaults = UserDefaults.standard
++
++        if defaults.menuAnisetteURL == item.address {
++            defaults.menuAnisetteURL =
++                items.first(where: { !$0.isHidden })?.address ?? ""
++        }
++
++        persistLocalServers()
++        return defaults.menuAnisetteURL
++    }
++
++    // MARK: Local Persistence
++
++    private func persistLocalServers() {
+         let currentItems = items
+-        Task {
++
++        Task { @MainActor in
+             await AnisetteServersManager.shared.saveLocalServers(currentItems)
+         }
+     }
++}
+ 
+-    func toggleHide(item: AnisetteServerItem) {
+-        if let index = items.firstIndex(where: { $0.address == item.address }) {
+-            items[index].isHidden.toggle()
+-            let currentItems = items
+-            Task {
+-                await AnisetteServersManager.shared.saveLocalServers(currentItems)
++// MARK: - Add Custom Server Sheet
++
++private struct AddCustomAnisetteServerSheet: View {
++    @Binding var isPresented: Bool
++    @Binding var name: String
++    @Binding var address: String
++    @Binding var errorMessage: String?
++
++    var onAdd: (String, String) -> String?
++
++    var body: some View {
++        NavigationView {
++            formContent
++                .navigationTitle("Add Server")
++                #if !os(tvOS)
++                .navigationBarTitleDisplayMode(.inline)
++                #endif
++                .navigationBarItems(
++                    leading: SUIButton("Cancel") {
++                        isPresented = false
++                    },
++                    trailing: SUIButton("Add") {
++                        if let error = onAdd(name, address) {
++                            errorMessage = error
++                        } else {
++                            isPresented = false
++                        }
++                    }
++                )
++        }
++    }
++
++    @ViewBuilder
++    private var formContent: some View {
++        Form {
++            Section(
++                header: Text("Custom Anisette Server"),
++                footer: Text(
++                    "Enter an anisette-v3 URL. Prefer Windows ADI hosts (for example, https://ani.jkcoxson.com or https://win.ani.sidestore.io) for Apple ID sign-in."
++                )
++            ) {
++                TextField("Name (optional)", text: $name)
++
++                #if !os(tvOS)
++                TextField("https://ani.example.com", text: $address)
++                    .textInputAutocapitalization(.never)
++                    .autocorrectionDisabled(true)
++                    .keyboardType(.URL)
++                #else
++                TextField("https://ani.example.com", text: $address)
++                #endif
++            }
++
++            if let errorMessage {
++                Section {
++                    Text(errorMessage)
++                        .foregroundColor(.red)
++                }
+             }
+         }
+     }
+ }
+ 
++// MARK: - Anisette Servers View
++
+ struct AnisetteServersView: View {
+-    @Environment(\.presentationMode) var presentationMode
++    @Environment(\.presentationMode) private var presentationMode
+     @StateObject private var viewModel = AnisetteViewModel()
+-    @State private var selectedServerURL: String = ""
++
++    @State private var selectedServerURL = ""
+     @State private var showingFileImporter = false
+     @State private var showingShareSheet = false
+-    @State private var exportFileURL: URL? = nil
++    @State private var exportFileURL: URL?
+     @State private var isEditingURL = false
+-    @State private var editingURLText: String = ""
++    @State private var editingURLText = ""
+     @State private var showingClearAlert = false
+     @State private var showingImportAlert = false
+-    @State private var pendingImportData: Data? = nil
+-    @State private var pendingImportName: String? = nil
++    @State private var showingAddServer = false
++    @State private var newServerName = ""
++    @State private var newServerAddress = ""
++    @State private var addServerError: String?
++    @State private var pendingImportData: Data?
++    @State private var pendingImportName: String?
++
+     #if os(tvOS)
+     @State private var showingTvOptionsMenu = false
+     #endif
+@@ -263,13 +634,345 @@ struct AnisetteServersView: View {
+     }
+ 
+     var body: some View {
++        serverList
++            .navigationTitle("Anisette Servers")
++            .toolbar {
++                ToolbarItemGroup(placement: .navigationBarTrailing) {
++                    SwiftUI.Button {
++                        newServerName = ""
++                        newServerAddress = ""
++                        addServerError = nil
++                        showingAddServer = true
++                    } label: {
++                        Image(systemName: "plus")
++                    }
++
++                    if viewModel.isOfflineMode {
++                        SwiftUI.Button {
++                            showingClearAlert = true
++                        } label: {
++                            Image(systemName: "xmark.circle")
++                                .foregroundColor(.red)
++                        }
++                        .tint(.red)
++                    } else {
++                        SwiftUI.Button {
++                            #if !os(tvOS)
++                            showingFileImporter = true
++                            #else
++                            if let topVC = UIApplication.shared.topViewController() {
++                                TVWebFileTransferManager.shared.startImport(
++                                    acceptedExtensions: ["json"],
++                                    title: "Import Anisette Servers JSON",
++                                    presentingVC: topVC
++                                ) { fileURL in
++                                    guard let fileURL,
++                                          let data = try? Data(contentsOf: fileURL)
++                                    else {
++                                        return
++                                    }
++
++                                    DispatchQueue.main.async {
++                                        pendingImportData = data
++                                        pendingImportName = fileURL.lastPathComponent
++                                        showingImportAlert = true
++                                    }
++                                }
++                            }
++                            #endif
++                        } label: {
++                            Image(systemName: "doc.badge.plus")
++                        }
++                    }
++
++                    #if !os(tvOS)
++                    Menu {
++                        if viewModel.hasHiddenItems {
++                            SwiftUI.Button {
++                                viewModel.showHiddenServers.toggle()
++                            } label: {
++                                Label(
++                                    viewModel.showHiddenServers
++                                        ? "Hide Hidden"
++                                        : "Show Hidden",
++                                    systemImage: viewModel.showHiddenServers
++                                        ? "eye.slash"
++                                        : "eye"
++                                )
++                            }
++                        }
++
++                        SwiftUI.Button {
++                            Task {
++                                if let url = await viewModel.exportCatalog() {
++                                    exportFileURL = url
++                                    showingShareSheet = true
++                                }
++                            }
++                        } label: {
++                            Label(
++                                "Export Current",
++                                systemImage: "square.and.arrow.up"
++                            )
++                        }
++
++                        if viewModel.isOfflineMode {
++                            SwiftUI.Button {
++                                Task {
++                                    if let url = await viewModel.exportCatalog(
++                                        unmodified: true
++                                    ) {
++                                        exportFileURL = url
++                                        showingShareSheet = true
++                                    }
++                                }
++                            } label: {
++                                Label(
++                                    "Export Original",
++                                    systemImage: "doc.on.doc"
++                                )
++                            }
++                        }
++
++                        SwiftUI.Button(role: .destructive) {
++                            Task {
++                                await viewModel.resetToOriginalState()
++                            }
++                        } label: {
++                            Label(
++                                "Reset Catalog",
++                                systemImage: "arrow.circlepath"
++                            )
++                        }
++                    } label: {
++                        Image(systemName: "ellipsis.circle")
++                    }
++                    #else
++                    SwiftUI.Button {
++                        showingTvOptionsMenu = true
++                    } label: {
++                        Image(systemName: "ellipsis.circle")
++                    }
++                    #endif
++                }
++            }
++            #if os(tvOS)
++            .confirmationDialog(
++                "Options",
++                isPresented: $showingTvOptionsMenu
++            ) {
++                if viewModel.hasHiddenItems {
++                    SwiftUI.Button(
++                        viewModel.showHiddenServers
++                            ? "Hide Hidden"
++                            : "Show Hidden"
++                    ) {
++                        viewModel.showHiddenServers.toggle()
++                    }
++                }
++
++                SwiftUI.Button("Export Current") {
++                    Task {
++                        if let url = await viewModel.exportCatalog(),
++                           let topVC = UIApplication.shared.topViewController() {
++                            TVWebFileTransferManager.shared.startExport(
++                                fileURL: url,
++                                title: "Export Anisette Servers JSON",
++                                presentingVC: topVC
++                            )
++                        }
++                    }
++                }
++
++                if viewModel.isOfflineMode {
++                    SwiftUI.Button("Export Original") {
++                        Task {
++                            if let url = await viewModel.exportCatalog(
++                                unmodified: true
++                            ),
++                               let topVC = UIApplication.shared.topViewController() {
++                                TVWebFileTransferManager.shared.startExport(
++                                    fileURL: url,
++                                    title: "Export Anisette Servers JSON",
++                                    presentingVC: topVC
++                                )
++                            }
++                        }
++                    }
++                }
++
++                SwiftUI.Button(
++                    "Reset Catalog",
++                    role: .destructive
++                ) {
++                    Task {
++                        await viewModel.resetToOriginalState()
++                    }
++                }
++            }
++            #endif
++            #if !os(tvOS)
++            .fileImporter(
++                isPresented: $showingFileImporter,
++                allowedContentTypes: [.json],
++                allowsMultipleSelection: false
++            ) { result in
++                switch result {
++                case .success(let urls):
++                    guard let url = urls.first else {
++                        return
++                    }
++
++                    let isAccessing =
++                        url.startAccessingSecurityScopedResource()
++
++                    defer {
++                        if isAccessing {
++                            url.stopAccessingSecurityScopedResource()
++                        }
++                    }
++
++                    do {
++                        pendingImportData = try Data(contentsOf: url)
++                        pendingImportName = url.lastPathComponent
++                        showingImportAlert = true
++                    } catch {
++                        viewModel.errorMessage =
++                            "Failed to read file: \(error.localizedDescription)"
++                    }
++
++                case .failure(let error):
++                    viewModel.errorMessage =
++                        "Import failed: \(error.localizedDescription)"
++                }
++            }
++            #endif
++            .alert(
++                "Clear Imported File?",
++                isPresented: $showingClearAlert
++            ) {
++                SwiftUI.Button("Clear", role: .destructive) {
++                    Task {
++                        await viewModel.clearImportedFile()
++                    }
++                }
++
++                SwiftUI.Button("Cancel", role: .cancel) {}
++            } message: {
++                Text(
++                    "Are you sure you want to remove the imported catalog '\(viewModel.importedFileName ?? "custom.json")' and return to the default server URL?"
++                )
++            }
++            .alert(
++                "Import Server Catalog?",
++                isPresented: $showingImportAlert
++            ) {
++                SwiftUI.Button("Import") {
++                    guard let data = pendingImportData,
++                          let name = pendingImportName
++                    else {
++                        return
++                    }
++
++                    Task {
++                        await viewModel.importData(data, filename: name)
++                    }
++                }
++
++                SwiftUI.Button("Cancel", role: .cancel) {}
++            } message: {
++                Text(
++                    "This will replace your current server catalog with the servers from '\(pendingImportName ?? "selected file")'. Do you want to proceed?"
++                )
++            }
++            .sheet(isPresented: $showingAddServer) {
++                AddCustomAnisetteServerSheet(
++                    isPresented: $showingAddServer,
++                    name: $newServerName,
++                    address: $newServerAddress,
++                    errorMessage: $addServerError
++                ) { name, address in
++                    if let error = viewModel.addCustomServer(
++                        name: name,
++                        address: address
++                    ) {
++                        return error
++                    }
++
++                    selectedServerURL =
++                        UserDefaults.standard.menuAnisetteURL
++
++                    return nil
++                }
++            }
++            .sheet(isPresented: $showingShareSheet) {
++                if let fileURL = exportFileURL {
++                    ActivityViewController(activityItems: [fileURL])
++                }
++            }
++            .task {
++                let active = UserDefaults.standard.menuAnisetteURL
++
++                if !active.isEmpty {
++                    selectedServerURL = active
++                } else if let selected, !selected.isEmpty {
++                    selectedServerURL = selected
++                }
++
++                await viewModel.fetchServers()
++            }
++    }
++
++    // MARK: Server List
++
++    @ViewBuilder
++    private var serverList: some View {
+         List {
++            // SideInstaller 1.6.1 Auto — exact Engine.anisetteAuto + candidates()
++            Section {
++                Toggle(isOn: Binding(
++                    get: {
++                        // SideInstaller default: Auto ON
++                        if UserDefaults.standard.object(forKey: "anisetteServerAuto") == nil {
++                            return true
++                        }
++                        return UserDefaults.standard.bool(forKey: "anisetteServerAuto")
++                    },
++                    set: { newValue in
++                        UserDefaults.standard.set(newValue, forKey: "anisetteServerAuto")
++                        AnisetteProvider.setAutoEnabled(newValue)
++                        if newValue {
++                            UserDefaults.standard.useOnDeviceAnisette = false
++                            // Auto tries Mac candidates in SideInstaller order
++                            if UserDefaults.standard.menuAnisetteURL.isEmpty {
++                                UserDefaults.standard.menuAnisetteURL = AnisetteProvider.fallbackServerURL
++                            }
++                        }
++                    }
++                )) {
++                    VStack(alignment: .leading, spacing: 4) {
++                        Text("Auto")
++                            .font(.body)
++                        Text("Starts with the server that signed in last, then tries the others — Mac ADI first (SideStore New → jkcoxson → iLoader). Same as SideInstaller.")
++                            .font(.caption)
++                            .foregroundColor(.secondary)
++                    }
++                }
++                .tint(.accentColor)
++            } footer: {
++                Text("Auto on: tries Mac anisette servers in SideInstaller order when one fails. Auto off: only the server you pick below is tried.")
++            }
++
+             // Section 1: Server Selection
++
+             Section {
+                 if viewModel.items.isEmpty || viewModel.errorMessage != nil {
+-                    if viewModel.items.isEmpty && viewModel.errorMessage == nil && viewModel.isLoading {
++                    if viewModel.items.isEmpty,
++                       viewModel.errorMessage == nil,
++                       viewModel.isLoading {
+                         VStack(spacing: 12) {
+                             Spacer()
++
+                             ProgressView()
+                                 .scaleEffect(1.2)
+ 
+@@ -277,35 +980,50 @@ struct AnisetteServersView: View {
+                                 .font(.headline)
+                                 .foregroundColor(.primary)
+ 
+-                            Text("Reaching catalog source '\(viewModel.source)'...")
+-                                .font(.caption)
+-                                .foregroundColor(.secondary)
+-                                .multilineTextAlignment(.center)
+-                                .padding(.horizontal, 16)
++                            Text(
++                                "Reaching catalog source '\(viewModel.source)'..."
++                            )
++                            .font(.caption)
++                            .foregroundColor(.secondary)
++                            .multilineTextAlignment(.center)
++                            .padding(.horizontal, 16)
++
+                             Spacer()
+                         }
+                         .frame(maxWidth: .infinity, minHeight: 180)
+                         .padding(.vertical, 8)
+                     } else {
+                         VStack(spacing: 12) {
+-                            Image(systemName: viewModel.isNoInternet ? "wifi.slash" : "antenna.radiowaves.left.and.right.slash")
+-                                .font(.system(size: 36))
+-                                .foregroundColor(.orange)
+-                                .padding(.top, 4)
++                            Image(
++                                systemName: viewModel.isNoInternet
++                                    ? "wifi.slash"
++                                    : "antenna.radiowaves.left.and.right.slash"
++                            )
++                            .font(.system(size: 36))
++                            .foregroundColor(.orange)
++                            .padding(.top, 4)
+ 
+-                            Text(viewModel.isNoInternet ? "No Internet Connection" : "Could Not Reach Servers")
+-                                .font(.headline)
+-                                .foregroundColor(.primary)
++                            Text(
++                                viewModel.isNoInternet
++                                    ? "No Internet Connection"
++                                    : "Could Not Reach Servers"
++                            )
++                            .font(.headline)
++                            .foregroundColor(.primary)
+ 
+-                            Text(viewModel.errorMessage ?? "No servers available.")
+-                                .font(.caption)
+-                                .foregroundColor(.secondary)
+-                                .multilineTextAlignment(.center)
+-                                .padding(.horizontal, 16)
++                            Text(
++                                viewModel.errorMessage ?? "No servers available."
++                            )
++                            .font(.caption)
++                            .foregroundColor(.secondary)
++                            .multilineTextAlignment(.center)
++                            .padding(.horizontal, 16)
+ 
+                             SwiftUI.Button {
+                                 Task {
+-                                    await viewModel.fetchServers(forceRemote: true)
++                                    await viewModel.fetchServers(
++                                        forceRemote: true
++                                    )
+                                 }
+                             } label: {
+                                 if viewModel.isLoading {
+@@ -315,8 +1033,11 @@ struct AnisetteServersView: View {
+                                     }
+                                     .font(.subheadline.weight(.medium))
+                                 } else {
+-                                    Label("Retry Connection", systemImage: "arrow.clockwise")
+-                                        .font(.subheadline.weight(.medium))
++                                    Label(
++                                        "Retry Connection",
++                                        systemImage: "arrow.clockwise"
++                                    )
++                                    .font(.subheadline.weight(.medium))
+                                 }
+                             }
+                             .disabled(viewModel.isLoading)
+@@ -327,61 +1048,11 @@ struct AnisetteServersView: View {
+                         .padding(.vertical, 8)
+                     }
+                 } else {
+-                    ForEach(Array(viewModel.visibleItems.enumerated()), id: \.element.id) { index, item in
+-                        SwiftUI.Button {
+-                            selectedServerURL = item.address
+-                            UserDefaults.standard.menuAnisetteURL = item.address
+-                            UserDefaults.standard.synchronize()
+-                        } label: {
+-                            HStack(spacing: 12) {
+-                                Text("#\(index + 1)")
+-                                    .font(.subheadline.monospacedDigit().weight(.bold))
+-                                    .foregroundColor(.secondary)
+-                                    .frame(minWidth: 26, alignment: .leading)
+-
+-                                VStack(alignment: .leading, spacing: 2) {
+-                                    HStack(spacing: 6) {
+-                                        Text(item.name)
+-                                            .font(.body)
+-                                            .foregroundColor(item.isHidden ? .secondary : .primary)
+-
+-                                        if item.isHidden {
+-                                            Text("Hidden")
+-                                                .font(.caption2)
+-                                                .foregroundColor(.secondary)
+-                                                .padding(.horizontal, 6)
+-                                                .padding(.vertical, 2)
+-                                                .background(Capsule().fill(Color.secondary.opacity(0.2)))
+-                                        }
+-                                    }
+-
+-                                    Text(item.address)
+-                                        .font(.caption)
+-                                        .foregroundColor(.secondary)
+-                                }
+-
+-                                Spacer()
+-
+-                                if selectedServerURL == item.address {
+-                                    Image(systemName: "checkmark")
+-                                        .font(.body.weight(.semibold))
+-                                        .foregroundColor(.accentColor)
+-                                }
+-                            }
+-                            .opacity(item.isHidden ? 0.6 : 1.0)
+-                            .contentShape(Rectangle())
+-                        }
+-                        .buttonStyle(PlainButtonStyle())
+-                        #if !os(tvOS)
+-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+-                            SwiftUI.Button {
+-                                viewModel.toggleHide(item: item)
+-                            } label: {
+-                                Label(item.isHidden ? "Unhide" : "Hide", systemImage: item.isHidden ? "eye" : "eye.slash")
+-                            }
+-                            .tint(item.isHidden ? .blue : .orange)
+-                        }
+-                        #endif
++                    ForEach(
++                        Array(viewModel.visibleItems.enumerated()),
++                        id: \.element.id
++                    ) { index, item in
++                        serverRow(item, index: index)
+                     }
+                     .onMove(perform: viewModel.moveItems)
+                 }
+@@ -389,6 +1060,7 @@ struct AnisetteServersView: View {
+                 if viewModel.isOfflineMode {
+                     HStack(spacing: 6) {
+                         Text("Available Servers (OFFLINE)")
++
+                         Image(systemName: "wifi.slash")
+                             .font(.subheadline)
+                             .foregroundColor(.orange)
+@@ -398,43 +1070,44 @@ struct AnisetteServersView: View {
+                 }
+             } footer: {
+                 if !viewModel.items.isEmpty && viewModel.errorMessage == nil {
+-                    Text("Drag to reorder server priority. Swipe left on a server to hide or unhide it.")
++                    Text(
++                        "Drag to reorder servers. Swipe left to remove custom servers or hide and unhide built-in servers."
++                    )
+                 }
+             }
+ 
+             // Section 2: Source Configuration
++
+             Section {
+                 if viewModel.isOfflineMode {
+                     HStack {
+                         Text("Catalog File")
+                             .foregroundColor(.primary)
++
+                         Spacer()
++
+                         Text(viewModel.importedFileName ?? "Imported File")
+                             .font(.subheadline)
+                             .foregroundColor(.secondary)
+                     }
+                     .padding(.vertical, 2)
+                     .contextMenu {
+-                         SwiftUI.Button {
+-                            Task {
+-                                if let url = await viewModel.exportCatalog(unmodified: false) {
+-                                    exportFileURL = url
+-                                    showingShareSheet = true
+-                                }
+-                            }
++                        SwiftUI.Button {
++                            exportCatalog(unmodified: false)
+                         } label: {
+-                            Label("Export Current", systemImage: "square.and.arrow.up")
++                            Label(
++                                "Export Current",
++                                systemImage: "square.and.arrow.up"
++                            )
+                         }
+ 
+                         SwiftUI.Button {
+-                            Task {
+-                                if let url = await viewModel.exportCatalog(unmodified: true) {
+-                                    exportFileURL = url
+-                                    showingShareSheet = true
+-                                }
+-                            }
++                            exportCatalog(unmodified: true)
+                         } label: {
+-                            Label("Export Original", systemImage: "doc.on.doc")
++                            Label(
++                                "Export Original",
++                                systemImage: "doc.on.doc"
++                            )
+                         }
+ 
+                         SwiftUI.Button(role: .destructive) {
+@@ -442,7 +1115,10 @@ struct AnisetteServersView: View {
+                                 await viewModel.resetToOriginalState()
+                             }
+                         } label: {
+-                            Label("Reset Catalog", systemImage: "arrow.circlepath")
++                            Label(
++                                "Reset Catalog",
++                                systemImage: "arrow.circlepath"
++                            )
+                         }
+                     }
+                 } else {
+@@ -452,10 +1128,13 @@ struct AnisetteServersView: View {
+                             .foregroundColor(.secondary)
+ 
+                         if isEditingURL {
+-                            TextField("https://...", text: $editingURLText)
+-                                .font(.subheadline)
+-                                .autocapitalization(.none)
+-                                .disableAutocorrection(true)
++                            TextField(
++                                "https://...",
++                                text: $editingURLText
++                            )
++                            .font(.subheadline)
++                            .textInputAutocapitalization(.never)
++                            .autocorrectionDisabled(true)
+                         } else {
+                             Text(viewModel.source)
+                                 .font(.subheadline)
+@@ -467,36 +1146,32 @@ struct AnisetteServersView: View {
+                     .padding(.vertical, 2)
+                     .contextMenu {
+                         SwiftUI.Button {
+-                            Task {
+-                                if let url = await viewModel.exportCatalog(unmodified: false) {
+-                                    exportFileURL = url
+-                                    showingShareSheet = true
+-                                }
+-                            }
++                            exportCatalog(unmodified: false)
+                         } label: {
+-                            Label("Export Current", systemImage: "square.and.arrow.up")
++                            Label(
++                                "Export Current",
++                                systemImage: "square.and.arrow.up"
++                            )
+                         }
+ 
+-                        if viewModel.isOfflineMode {
+-                            SwiftUI.Button {
+-                                Task {
+-                                    if let url = await viewModel.exportCatalog(unmodified: true) {
+-                                        exportFileURL = url
+-                                        showingShareSheet = true
+-                                    }
+-                                }
+-                            } label: {
+-                                Label("Export Original", systemImage: "doc.on.doc")
+-                            }
+-                        } else if viewModel.source != AnisetteViewModel.defaultSource {
++                        if viewModel.source != AnisetteViewModel.defaultSource {
+                             SwiftUI.Button(role: .destructive) {
+-                                viewModel.source = AnisetteViewModel.defaultSource
+-                                UserDefaults.standard.menuAnisetteList = AnisetteViewModel.defaultSource
++                                viewModel.source =
++                                    AnisetteViewModel.defaultSource
++
++                                UserDefaults.standard.menuAnisetteList =
++                                    AnisetteViewModel.defaultSource
++
+                                 Task {
+-                                    await viewModel.fetchServers(forceRemote: true)
++                                    await viewModel.fetchServers(
++                                        forceRemote: true
++                                    )
+                                 }
+                             } label: {
+-                                Label("Reset Source to Default", systemImage: "arrow.circlepath")
++                                Label(
++                                    "Reset Source to Default",
++                                    systemImage: "arrow.circlepath"
++                                )
+                             }
+                         }
+ 
+@@ -505,252 +1180,210 @@ struct AnisetteServersView: View {
+                                 await viewModel.resetToOriginalState()
+                             }
+                         } label: {
+-                            Label("Reset Catalog", systemImage: "arrow.circlepath")
++                            Label(
++                                "Reset Catalog",
++                                systemImage: "arrow.circlepath"
++                            )
+                         }
+                     }
+                 }
+-                    } header: {
+-                        HStack {
+-                            Text("Server Catalog Source")
+-                            Spacer()
+-                            if !viewModel.isOfflineMode {
+-                                SwiftUI.Button(isEditingURL ? "Done" : "Edit") {
+-                                    if isEditingURL {
+-                                        isEditingURL = false
+-                                        let trimmed = editingURLText.trimmingCharacters(in: .whitespacesAndNewlines)
+-                                        if !trimmed.isEmpty && trimmed != viewModel.source {
+-                                            viewModel.source = trimmed
+-                                            UserDefaults.standard.menuAnisetteList = trimmed
+-                                            Task {
+-                                                await viewModel.fetchServers(forceRemote: true)
+-                                            }
+-                                        }
+-                                    } else {
+-                                        editingURLText = viewModel.source
+-                                        isEditingURL = true
+-                                    }
+-                                }
+-                                .font(.subheadline.weight(.semibold))
+-                            }
+-                        }
+-                    } footer: {
+-                        if viewModel.isOfflineMode {
+-                            Text("Currently using imported file '\(viewModel.importedFileName ?? "custom.json")'. Press and hold row to export.")
+-                        } else {
+-                            Text("URL of the JSON file containing registered Anisette servers. Press and hold row to export.")
+-                        }
+-                    }
++            } header: {
++                HStack {
++                    Text("Server Catalog Source")
+ 
+-                    // Section: Customization
+-                    Section {
+-                        Toggle(isOn: Binding(
+-                            get: { !UserDefaults.standard.disableAnisetteRotation },
+-                            set: { UserDefaults.standard.disableAnisetteRotation = !$0 }
+-                        )) {
+-                            Label("Enable Auto Rotation", systemImage: "arrow.triangle.2.circlepath")
+-                        }
+-                    } header: {
+-                        Text("Customization")
+-                    } footer: {
+-                        Text("Control if SideStore automatically rotates/retries servers upon failure.")
+-                    }
++                    Spacer()
+ 
+-                    // Bottom spacing section
+-                    Section {
+-                        Color.clear
+-                            .frame(height: 20)
+-                            .listRowBackground(Color.clear)
+-                    }
+-                }
+-                #if !os(tvOS)
+-                .listStyle(.insetGrouped)
+-                #else
+-                .listStyle(.grouped)
+-                #endif
+-                .refreshable {
+-                    await viewModel.fetchServers(forceRemote: true)
+-                }
+-        .navigationTitle("Anisette Servers")
+-        .toolbar {
+-            ToolbarItemGroup(placement: .navigationBarTrailing) {
+-                if viewModel.isOfflineMode {
+-                    SwiftUI.Button {
+-                        showingClearAlert = true
+-                    } label: {
+-                        Image(systemName: "xmark.circle")
+-                            .foregroundColor(.red)
+-                    }
+-                    .tint(.red)
+-                } else {
+-                    SwiftUI.Button {
+-                        #if !os(tvOS)
+-                        showingFileImporter = true
+-                        #else
+-                        if let topVC = UIApplication.shared.topViewController() {
+-                            TVWebFileTransferManager.shared.startImport(
+-                                acceptedExtensions: ["json"],
+-                                title: "Import Anisette Servers JSON",
+-                                presentingVC: topVC
+-                            ) { fileURL in
+-                                guard let fileURL = fileURL else { return }
+-                                if let data = try? Data(contentsOf: fileURL) {
+-                                    DispatchQueue.main.async {
+-                                        pendingImportData = data
+-                                        pendingImportName = fileURL.lastPathComponent
+-                                        showingImportAlert = true
+-                                    }
+-                                }
+-                            }
+-                        }
+-                        #endif
+-                    } label: {
+-                        Image(systemName: "doc.badge.plus")
+-                    }
+-                }
++                    if !viewModel.isOfflineMode {
++                        SwiftUI.Button(
++                            isEditingURL ? "Done" : "Edit"
++                        ) {
++                            if isEditingURL {
++                                isEditingURL = false
+ 
+-                #if !os(tvOS)
+-                Menu {
+-                    if viewModel.hasHiddenItems {
+-                        SwiftUI.Button {
+-                            viewModel.showHiddenServers.toggle()
+-                        } label: {
+-                            Label(viewModel.showHiddenServers ? "Hide Hidden" : "Show Hidden", systemImage: viewModel.showHiddenServers ? "eye.slash" : "eye")
+-                        }
+-                    }
++                                let trimmed = editingURLText.trimmingCharacters(
++                                    in: .whitespacesAndNewlines
++                                )
+ 
+-                    SwiftUI.Button {
+-                        Task {
+-                            if let url = await viewModel.exportCatalog(unmodified: false) {
+-                                exportFileURL = url
+-                                showingShareSheet = true
+-                            }
+-                        }
+-                    } label: {
+-                        Label("Export Current", systemImage: "square.and.arrow.up")
+-                    }
++                                if !trimmed.isEmpty &&
++                                   trimmed != viewModel.source {
++                                    viewModel.source = trimmed
++                                    UserDefaults.standard.menuAnisetteList =
++                                        trimmed
+ 
+-                    if viewModel.isOfflineMode {
+-                        SwiftUI.Button {
+-                            Task {
+-                                if let url = await viewModel.exportCatalog(unmodified: true) {
+-                                    exportFileURL = url
+-                                    showingShareSheet = true
++                                    Task {
++                                        await viewModel.fetchServers(
++                                            forceRemote: true
++                                        )
++                                    }
+                                 }
++                            } else {
++                                editingURLText = viewModel.source
++                                isEditingURL = true
+                             }
+-                        } label: {
+-                            Label("Export Original", systemImage: "doc.on.doc")
+                         }
++                        .font(.subheadline.weight(.semibold))
+                     }
+-
+-                    SwiftUI.Button(role: .destructive) {
+-                        Task {
+-                            await viewModel.resetToOriginalState()
+-                        }
+-                    } label: {
+-                        Label("Reset Catalog", systemImage: "arrow.circlepath")
+-                    }
+-                } label: {
+-                    Image(systemName: "ellipsis.circle")
+                 }
+-                #else
+-                SwiftUI.Button {
+-                    showingTvOptionsMenu = true
+-                } label: {
+-                    Image(systemName: "ellipsis.circle")
+-                }
+-                #endif
+-            }
+-        }
+-        #if os(tvOS)
+-        .confirmationDialog("Options", isPresented: $showingTvOptionsMenu) {
+-            if viewModel.hasHiddenItems {
+-                SwiftUI.Button(viewModel.showHiddenServers ? "Hide Hidden" : "Show Hidden") {
+-                    viewModel.showHiddenServers.toggle()
+-                }
+-            }
+-            SwiftUI.Button("Export Current") {
+-                Task {
+-                    if let url = await viewModel.exportCatalog(unmodified: false), let topVC = UIApplication.shared.topViewController() {
+-                        TVWebFileTransferManager.shared.startExport(fileURL: url, title: "Export Anisette Servers JSON", presentingVC: topVC)
+-                    }
++            } footer: {
++                if viewModel.isOfflineMode {
++                    Text(
++                        "Currently using imported file '\(viewModel.importedFileName ?? "custom.json")'. Press and hold row to export."
++                    )
++                } else {
++                    Text(
++                        "URL of the JSON file containing registered Anisette servers. Press and hold row to export."
++                    )
+                 }
+             }
+-            if viewModel.isOfflineMode {
+-                SwiftUI.Button("Export Original") {
+-                    Task {
+-                        if let url = await viewModel.exportCatalog(unmodified: true), let topVC = UIApplication.shared.topViewController() {
+-                            TVWebFileTransferManager.shared.startExport(fileURL: url, title: "Export Anisette Servers JSON", presentingVC: topVC)
++
++            // Section 3: Customization
++
++            Section {
++                Toggle(
++                    isOn: Binding(
++                        get: {
++                            !UserDefaults.standard.disableAnisetteRotation
++                        },
++                        set: {
++                            UserDefaults.standard.disableAnisetteRotation = !$0
+                         }
+-                    }
++                    )
++                ) {
++                    Label(
++                        "Enable Auto Rotation",
++                        systemImage: "arrow.triangle.2.circlepath"
++                    )
+                 }
++            } header: {
++                Text("Customization")
++            } footer: {
++                Text(
++                    "Control if SideStore automatically rotates/retries servers upon failure."
++                )
+             }
+-            SwiftUI.Button("Reset Catalog", role: .destructive) {
+-                Task {
+-                    await viewModel.resetToOriginalState()
+-                }
++
++            Section {
++                Color.clear
++                    .frame(height: 20)
++                    .listRowBackground(Color.clear)
+             }
+         }
+-        #endif
+         #if !os(tvOS)
+-        .fileImporter(
+-            isPresented: $showingFileImporter,
+-            allowedContentTypes: [.json],
+-            allowsMultipleSelection: false
+-        ) { result in
+-            switch result {
+-            case .success(let urls):
+-                if let url = urls.first {
+-                    let isAccessing = url.startAccessingSecurityScopedResource()
+-                    defer { if isAccessing { url.stopAccessingSecurityScopedResource() } }
+-                    do {
+-                        let data = try Data(contentsOf: url)
+-                        pendingImportData = data
+-                        pendingImportName = url.lastPathComponent
+-                        showingImportAlert = true
+-                    } catch {
+-                        viewModel.errorMessage = "Failed to read file: \(error.localizedDescription)"
+-                    }
+-                }
+-            case .failure(let error):
+-                viewModel.errorMessage = "Import failed: \(error.localizedDescription)"
+-            }
+-        }
++        .listStyle(.insetGrouped)
++        #else
++        .listStyle(.grouped)
+         #endif
+-        .alert("Clear Imported File?", isPresented: $showingClearAlert) {
+-            SwiftUI.Button("Clear", role: .destructive) {
+-                Task {
+-                    await viewModel.clearImportedFile()
+-                }
+-            }
+-            SwiftUI.Button("Cancel", role: .cancel) {}
+-        } message: {
+-            Text("Are you sure you want to remove the imported catalog '\(viewModel.importedFileName ?? "custom.json")' and return to the default server URL?")
++        .refreshable {
++            await viewModel.fetchServers(forceRemote: true)
+         }
+-        .alert("Import Server Catalog?", isPresented: $showingImportAlert) {
+-            SwiftUI.Button("Import") {
+-                if let data = pendingImportData, let name = pendingImportName {
+-                    Task {
+-                        await viewModel.importData(data, filename: name)
++    }
++
++    // MARK: Server Row
++
++    @ViewBuilder
++    private func serverRow(
++        _ item: AnisetteServerItem,
++        index: Int
++    ) -> some View {
++        SwiftUI.Button {
++            selectedServerURL = item.address
++            UserDefaults.standard.menuAnisetteURL = item.address
++        } label: {
++            HStack(spacing: 12) {
++                Text("#\(index + 1)")
++                    .font(.subheadline.monospacedDigit().weight(.bold))
++                    .foregroundColor(.secondary)
++                    .frame(minWidth: 26, alignment: .leading)
++
++                VStack(alignment: .leading, spacing: 2) {
++                    HStack(spacing: 6) {
++                        Text(item.name)
++                            .font(.body)
++                            .foregroundColor(
++                                item.isHidden ? .secondary : .primary
++                            )
++
++                        if item.isHidden {
++                            Text("Hidden")
++                                .font(.caption2)
++                                .foregroundColor(.secondary)
++                                .padding(.horizontal, 6)
++                                .padding(.vertical, 2)
++                                .background(
++                                    Capsule().fill(
++                                        Color.secondary.opacity(0.2)
++                                    )
++                                )
++                        }
++
++                        if viewModel.customServerAddresses.contains(item.address) {
++                            Text("Custom")
++                                .font(.caption2)
++                                .foregroundColor(.accentColor)
++                                .padding(.horizontal, 6)
++                                .padding(.vertical, 2)
++                                .background(
++                                    Capsule().fill(
++                                        Color.accentColor.opacity(0.12)
++                                    )
++                                )
++                        }
+                     }
++
++                    Text(item.address)
++                        .font(.caption)
++                        .foregroundColor(.secondary)
++                }
++
++                Spacer()
++
++                if selectedServerURL == item.address {
++                    Image(systemName: "checkmark")
++                        .font(.body.weight(.semibold))
++                        .foregroundColor(.accentColor)
+                 }
+             }
+-            SwiftUI.Button("Cancel", role: .cancel) {}
+-        } message: {
+-            Text("This will replace your current server catalog with the servers from '\(pendingImportName ?? "selected file")'. Do you want to proceed?")
++            .opacity(item.isHidden ? 0.6 : 1.0)
++            .contentShape(Rectangle())
+         }
+-        .sheet(isPresented: $showingShareSheet) {
+-            if let fileURL = exportFileURL {
+-                ActivityViewController(activityItems: [fileURL])
++        .buttonStyle(PlainButtonStyle())
++        #if !os(tvOS)
++        .swipeActions(
++            edge: .trailing,
++            allowsFullSwipe: false
++        ) {
++            if viewModel.customServerAddresses.contains(item.address) {
++                SwiftUI.Button(role: .destructive) {
++                    selectedServerURL =
++                        viewModel.removeCustomServer(item: item)
++                } label: {
++                    Label("Remove", systemImage: "trash")
++                }
++            } else {
++                SwiftUI.Button {
++                    viewModel.toggleHide(item: item)
++                } label: {
++                    Label(
++                        item.isHidden ? "Unhide" : "Hide",
++                        systemImage: item.isHidden ? "eye" : "eye.slash"
++                    )
++                }
++                .tint(item.isHidden ? .blue : .orange)
+             }
+         }
+-        .task {
+-            let active = selected ?? UserDefaults.standard.menuAnisetteURL
+-            if !active.isEmpty {
+-                selectedServerURL = active
++        #endif
++    }
++
++    // MARK: Export Helper
++
++    private func exportCatalog(unmodified: Bool) {
++        Task {
++            if let url = await viewModel.exportCatalog(
++                unmodified: unmodified
++            ) {
++                exportFileURL = url
++                showingShareSheet = true
+             }
+-            await viewModel.fetchServers()
+         }
+     }
+ }
+-
+-
+diff --git a/SideStore/AppBootManager.swift b/SideStore/AppBootManager.swift
+index ec9becb..3442191 100644
+--- a/SideStore/AppBootManager.swift
++++ b/SideStore/AppBootManager.swift
+@@ -29,6 +29,38 @@ public final class AppBootManager {
+     
+     private init() {}
+     
++    /// SideInstaller 1.6.1 post-install parity.
++    /// After SideInstaller installs SideStore it turns On-Device Anisette OFF,
++    /// auto-rotation OFF, picks "SideStore (New)", and clears Windows/Android
++    /// client-info overrides. We do the same once on boot so existing installs
++    /// get the working -80046 fix without needing SideInstaller.
++    private nonisolated func applySideInstallerAnisetteMigrationIfNeeded() {
++        let key = "AnisetteMacADI.sideInstallerParity.v1"
++        guard !UserDefaults.standard.bool(forKey: key) else { return }
++
++        let ud = UserDefaults.standard
++
++        // 1. On-Device Anisette OFF
++        ud.useOnDeviceAnisette = false
++
++        // 2. Auto-rotation OFF
++        ud.disableAnisetteRotation = true
++
++        // 3. Pick SideStore (New) — Mac anisette server
++        ud.menuAnisetteURL = AppConstants.Anisette.Servers.defaultServerURL
++
++        // 4. Put client info saved for a Windows PC or Android phone back to defaults
++        ud.customAnisetteClientInfo = nil
++        ud.customAnisetteUserAgent = nil
++        // Also clear any file-based overrides
++        AnisetteConfigManager.shared.resetToDefaults()
++
++        // 5. Fresh adi.pb so Apple issues a new Mac identity (asks for code once more)
++        AnisetteConfigManager.shared.anisetteAdiBlob = nil
++
++        ud.set(true, forKey: key)
++        debugLog("[AppBootManager] Applied SideInstaller 1.6.1 anisette migration (Mac path, ODA off, rotation off, SideStore New, adi.pb purged)")
++    }
+ 
+     public nonisolated func startMinimuxer(pairingFile: String) async throws {
+         debugLog("[AppBootManager] startMinimuxer() entered")
+@@ -107,6 +139,9 @@ public final class AppBootManager {
+     public nonisolated func performBootSequence() async {
+         debugLog("[AppBootManager] performBootSequence() entered")
+         defer { debugLog("[AppBootManager] performBootSequence() exited") }
++
++        // SideInstaller 1.6.1 parity — must run before any anisette/auth work
++        applySideInstallerAnisetteMigrationIfNeeded()
+         
+         async let jitCheck: Void = {
+             debugLog("[AppBootManager] performBootSequence(): JIT check starting")
+diff --git a/SideStore/AppConstants.swift b/SideStore/AppConstants.swift
+index de03a9c..b09edf1 100644
+--- a/SideStore/AppConstants.swift
++++ b/SideStore/AppConstants.swift
+@@ -27,11 +27,11 @@ public enum AppConstants {
+         public static let address             = MinimuxerConstants.empServerHost
+         public static let defaultPort: UInt16 = MinimuxerConstants.empServerPort
+         public static let port                = String(defaultPort)
+-        public static let serverURL           = "\(address):\(port)"
++        public static let serverURL          = "\(address):\(port)"
+     }
+     
+     public enum Connection {
+-        public static let defaultOverrideIP     = "10.7.0.1"
++        public static let defaultOverrideIP    = "10.7.0.1"
+         public static let defaultRemoteServerIP = "10.7.0.1"
+     }
+     
+@@ -53,7 +53,7 @@ public enum AppConstants {
+         public static let bonjourServiceName    = "SideJITServer"
+         public static let bonjourServiceType    = "_http._tcp"
+         public static let timeout: TimeInterval = 2.0
+-        public static let defaultServerURL      = "http://\(bonjourServiceName).\(bonjourServiceType).local:8080".lowercased()
++        public static let defaultServerURL       = "http://\(bonjourServiceName).\(bonjourServiceType).local:8080".lowercased()
+     }
+     
+     public enum WebTransferServer {
+@@ -68,9 +68,15 @@ public enum AppConstants {
+         public static let defaultODAMetadataURL       = URL(string: "https://zzz.haus/oda.json")!
+         public static var defaultODAMetadataURLString: String { defaultODAMetadataURL.absoluteString }
+ 
+-        // Proxied from upstream SideSign
+-        public static let defaultClientInfo           = Constants.Anisette.defaultClientInfo
+-        public static let defaultUserAgent            = Constants.Anisette.defaultUserAgent
++        // Temporary fix (SideInstaller v1.6.1 style):
++        // Apple now rejects Windows/Android anisette after the verification code with -80046.
++        // Prefer Mac anisette servers and report a current Mac client-info (not the ancient
++        // macOS 10.12 string that triggers -23782). Users can still override in Settings.
++        //
++        // Note: the exact modern Mac client-info string is supplied by the chosen Mac
++        // anisette server via /v3/client_info. We no longer hard-code the old Windows one.
++        public static let defaultClientInfo           = Servers.macClientInfo  // SideInstaller current Mac
++        public static let defaultUserAgent            = Servers.macUserAgent
+ 
+         public enum URLs {
+             public static let grandSlamLookup = Constants.Anisette.URLs.grandSlamLookup
+@@ -87,7 +93,7 @@ public enum AppConstants {
+             public static let userAgent        = Constants.Anisette.Headers.userAgent
+             public static let clientTime       = Constants.Anisette.Headers.clientTime
+             public static let locale           = Constants.Anisette.Headers.locale
+-            public static let timeZone         = Constants.Anisette.Headers.timeZone
++            public static let timeZone        = Constants.Anisette.Headers.timeZone
+         }
+ 
+         public enum Libraries {
+@@ -96,8 +102,28 @@ public enum AppConstants {
+ 
+         public enum Servers {
+             public static let defaultSource        = "https://servers.sidestore.io/servers.json"
+-            public static let defaultServerURL     = "https://ani.sidestore.io"
++            // SideInstaller 1.6.1: SideStore (New) first — Mac ADI library (fixes -80046)
++            public static let defaultServerURL     = "https://new.ani.sidestore.io"    // SideStore (New)
++            public static let secondaryServerURL   = "https://mac-ani.jkcoxson.com"    // jkcoxson Mac
++            public static let tertiaryServerURL    = "https://ani.iloader.app"         // iLoader (Mac ADI)
+             public static let connectivityCheckURL = URL(string: "https://www.apple.com/library/test/success.html")!
++
++            /// SideInstaller macADIOrder — Auto tries these hosts first (Mac ADI library).
++            public static let macADIOrder: [String] = [
++                "new.ani.sidestore.io",
++                "mac-ani.jkcoxson.com",
++                "ani.iloader.app",
++                "ani3.stikstore.app",
++                "ani2.stikstore.app",
++                "ani.sidestore.io",
++            ]
++            public static let macADIHosts: Set<String> = Set(macADIOrder)
++            public static let windowsADIHosts: Set<String> = [
++                "win.ani.sidestore.io",
++            ]
++            /// SideInstaller MAC_CLIENT_INFO — current Mac (servers still name 10.12)
++            public static let macClientInfo = "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
++            public static let macUserAgent  = "akd/1.0 CFNetwork/808.1.4"
+         }
+ 
+         public static let remoteCacheDuration     = Constants.Anisette.remoteCacheDuration
+@@ -109,7 +135,7 @@ public enum AppConstants {
+         public static let service        = Constants.GrandSlam.service
+         public static let headerVersion  = Constants.GrandSlam.headerVersion
+         public static let authApp        = Constants.GrandSlam.authApp
+-        public static let userAgent      = Constants.GrandSlam.userAgent
++        public static let userAgent       = Constants.GrandSlam.userAgent
+     }
+ 
+     public enum AppleAuth {
+@@ -146,11 +172,11 @@ public enum AppConstants {
+ 
+     public enum Minimuxer {
+         public static let remotePairingPort                     = MinimuxerConstants.remotePairingPort
+-        public static let lockdowndPort                         = MinimuxerConstants.lockdowndPort
+-        public static let defaultTCPProbeTimeoutMs              = MinimuxerConstants.defaultTCPProbeTimeoutMs
+-        public static let empServerHost                         = MinimuxerConstants.empServerHost
+-        public static let empServerPort                         = MinimuxerConstants.empServerPort
+-        public static let defaultHostName                       = MinimuxerConstants.defaultHostName
++        public static let lockdowndPort                          = MinimuxerConstants.lockdowndPort
++        public static let defaultTCPProbeTimeoutMs             = MinimuxerConstants.defaultTCPProbeTimeoutMs
++        public static let empServerHost                        = MinimuxerConstants.empServerHost
++        public static let empServerPort                        = MinimuxerConstants.empServerPort
++        public static let defaultHostName                      = MinimuxerConstants.defaultHostName
+         public static let defaultHostModel                      = MinimuxerConstants.defaultHostModel
+         public static let remotePairingDaemonServiceType        = MinimuxerConstants.remotePairingDaemonServiceType
+         public static let remotePairingPairableHostServiceType  = MinimuxerConstants.remotePairingPairableHostServiceType
+diff --git a/SideStore/Core/Anisette/AnisetteProvider.swift b/SideStore/Core/Anisette/AnisetteProvider.swift
+index bd62860..485c2cb 100644
+--- a/SideStore/Core/Anisette/AnisetteProvider.swift
++++ b/SideStore/Core/Anisette/AnisetteProvider.swift
+@@ -2,46 +2,309 @@
+ //  AnisetteProvider.swift
+ //  SideStore
+ //
+-//  Created by Magesh K on 8/9/26.
+-//  Copyright © 2026 SideStore. All rights reserved.
++//  SideInstaller 1.6.1 exact Auto anisette parity.
++//  candidates() / macADIOrder / library() match
++//  FrizzleM/SideInstaller ios-app/AnisetteServers.swift
+ //
+ 
+ import Foundation
+ import SideSign
+ 
+ enum AnisetteProvider {
++
++    // MARK: - SideInstaller ADI library classification (exact)
++
++    enum ADILibrary {
++        case mac, windows, android
++    }
++
++    /// SideInstaller `macADIOrder` — Auto tries these hosts first.
++    static let macADIOrder: [String] = [
++        "new.ani.sidestore.io",
++        "mac-ani.jkcoxson.com",
++        "ani.iloader.app",
++        "ani3.stikstore.app",
++        "ani.jkcoxson.com",
++        "ani2.stikstore.app",
++    ]
++    static let macADIHosts: Set<String> = Set(macADIOrder)
++    static let windowsADIHosts: Set<String> = ["win.ani.sidestore.io"]
++
++    /// SideInstaller `MAC_CLIENT_INFO` (grandslam.rs) — current Mac, not server's 10.12.
++    static let macClientInfo = "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
++    static let macUserAgent  = "akd/1.0 CFNetwork/808.1.4"
++
++    /// SideInstaller `AnisetteServer.fallback`
++    static let fallbackServerURL = "https://new.ani.sidestore.io"
++
++    /// SideInstaller Auto default (Engine.anisetteAuto defaults to true)
++    static var isAutoEnabled: Bool {
++        if UserDefaults.standard.object(forKey: "anisetteServerAuto") == nil {
++            return true
++        }
++        return UserDefaults.standard.bool(forKey: "anisetteServerAuto")
++    }
++
++    static func setAutoEnabled(_ enabled: Bool) {
++        UserDefaults.standard.set(enabled, forKey: "anisetteServerAuto")
++        if enabled {
++            UserDefaults.standard.useOnDeviceAnisette = false
++            // Auto tries multiple servers — allow rotation across Mac candidates
++            UserDefaults.standard.disableAnisetteRotation = false
++            if UserDefaults.standard.menuAnisetteURL.isEmpty {
++                UserDefaults.standard.menuAnisetteURL = fallbackServerURL
++            }
++        }
++    }
++
++    static func normalized(_ address: String) -> String {
++        var a = address.trimmingCharacters(in: .whitespacesAndNewlines)
++        while a.hasSuffix("/") { a.removeLast() }
++        return a.lowercased()
++    }
++
++    /// SideInstaller `library(of:in:)`
++    static func library(of address: String, serverNames: [String: String] = [:]) -> ADILibrary {
++        let key = normalized(address)
++        if let host = URL(string: key)?.host?.lowercased() {
++            if macADIHosts.contains(host) { return .mac }
++            if windowsADIHosts.contains(host) { return .windows }
++        }
++        let name = (serverNames[key] ?? "").lowercased()
++        if name.contains("mac adi") { return .mac }
++        if name.contains("windows") { return .windows }
++        return .android
++    }
++
++    /// SideInstaller `AnisetteServer.candidates(pick:servers:failing:)` — exact algorithm.
++    static func candidates(pick: String, servers: [String], serverNames: [String: String] = [:], failing: Set<String> = []) -> [String] {
++        var seen = Set<String>()
++        var out: [String] = []
++        func add(_ group: [String]) {
++            var failed: [String] = []
++            for address in group {
++                let a = address.trimmingCharacters(in: .whitespacesAndNewlines)
++                guard !a.isEmpty, seen.insert(normalized(a)).inserted else { continue }
++                if failing.contains(normalized(a)) {
++                    failed.append(a)
++                } else {
++                    out.append(a)
++                }
++            }
++            out += failed
++        }
++        let addresses = servers
++        let macServers = addresses.filter { library(of: $0, serverNames: serverNames) == .mac }
++        let mac = macADIOrder.compactMap { host in
++            macServers.first { URL(string: normalized($0))?.host?.lowercased() == host }
++        } + macServers
++        let windows = addresses.filter { library(of: $0, serverNames: serverNames) == .windows }
++        switch library(of: pick, serverNames: serverNames) {
++        case .mac:     add([pick] + mac)
++        case .windows: add([pick] + windows)
++        case .android: add([pick])  // alone — Android ends in -80046 for new login
++        }
++        add(mac)
++        add(windows)
++        return out
++    }
++
++    // MARK: - RecentFailures (SideInstaller, 12h window)
++
++    enum RecentFailures {
++        static let key = "anisetteServerFailures"
++        static let window: TimeInterval = 12 * 60 * 60
++
++        static func addresses(now: Date = Date()) -> Set<String> {
++            Set(stored().filter { now.timeIntervalSince1970 - $0.value < window }.keys)
++        }
++
++        static func record(_ address: String, error: String, now: Date = Date()) {
++            let e = error.lowercased()
++            // Only hold back real anisette-server faults
++            guard e.contains("anisette") || e.contains("timeout") || e.contains("502") || e.contains("503") else { return }
++            var failures = stored().filter { now.timeIntervalSince1970 - $0.value < window }
++            failures[normalized(address)] = now.timeIntervalSince1970
++            UserDefaults.standard.set(failures, forKey: key)
++        }
++
++        static func clear(_ address: String) {
++            var failures = stored()
++            guard failures.removeValue(forKey: normalized(address)) != nil else { return }
++            UserDefaults.standard.set(failures, forKey: key)
++        }
++
++        private static func stored() -> [String: Double] {
++            UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:]
++        }
++    }
++
++    // MARK: - Fetch
++
+     static func fetch(handler: AnisetteServerHandler? = nil) async throws -> ALTAnisetteData {
++        // SideInstaller post-install parity for SideStore: ODA always off
+         if UserDefaults.standard.useOnDeviceAnisette {
+-            debugLog("[AnisetteProvider] Fetching anisette via On-Device Anisette (ODA)...")
+-            return try await OnDeviceAnisetteManager.shared.fetchAnisetteData()
+-        } else {
+-            debugLog("[AnisetteProvider] Fetching anisette via remote server...")
+-            return try await fetchRemote(handler: handler)
++            debugLog("[AnisetteProvider] On-device anisette forced off (SideInstaller 1.6.1)")
++            UserDefaults.standard.useOnDeviceAnisette = false
++        }
++
++        // One-time purge so Mac ADI can create a fresh identity
++        let migKey = "AnisetteMacADI.purgeAdi.v1"
++        if !UserDefaults.standard.bool(forKey: migKey) {
++            AnisetteConfigManager.shared.anisetteAdiBlob = nil
++            UserDefaults.standard.set(true, forKey: migKey)
++            debugLog("[AnisetteProvider] Purged stored adi.pb for Mac ADI re-provision")
++        }
++
++        // Default Auto ON + SideStore (New) when unset
++        if UserDefaults.standard.object(forKey: "anisetteServerAuto") == nil {
++            UserDefaults.standard.set(true, forKey: "anisetteServerAuto")
++        }
++        if UserDefaults.standard.menuAnisetteURL.isEmpty ||
++            windowsADIHosts.contains(URL(string: UserDefaults.standard.menuAnisetteURL)?.host ?? "") {
++            UserDefaults.standard.menuAnisetteURL = fallbackServerURL
++        }
++
++        debugLog("[AnisetteProvider] Fetching anisette (SideInstaller Auto=\(isAutoEnabled))...")
++        return try await fetchRemote(handler: handler)
++    }
++
++    /// Always report SideInstaller current Mac (not server's macOS 10.12).
++    static func clientInfoToUse(advertisedClientInfo: String?, advertisedUserAgent: String?) -> (clientInfo: String, userAgent: String) {
++        let ua = (advertisedUserAgent?.isEmpty == false) ? advertisedUserAgent! : macUserAgent
++        return (macClientInfo, ua.isEmpty ? macUserAgent : ua)
++    }
++
++    private static func fetchServerClientInfo(from serverURL: URL) async -> (clientInfo: String?, userAgent: String?) {
++        guard var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false) else {
++            return (nil, nil)
++        }
++        var path = components.path
++        while path.hasSuffix("/") { path.removeLast() }
++        if path.hasSuffix("/v3/get_headers") {
++            path = String(path.dropLast("/v3/get_headers".count))
++        }
++        components.path = path + "/v3/client_info"
++        components.query = nil
++        guard let url = components.url else { return (nil, nil) }
++
++        var request = URLRequest(url: url)
++        request.httpMethod = "GET"
++        request.timeoutInterval = 15
++        request.setValue("application/json", forHTTPHeaderField: "Accept")
++
++        do {
++            let (data, response) = try await URLSession.shared.data(for: request)
++            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
++                return (nil, nil)
++            }
++            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
++                return (nil, nil)
++            }
++            let ci = json["client_info"] as? String
++            let ua = json["user_agent"] as? String
++            debugLog("[AnisetteProvider] Server client_info: \(ci ?? "nil"), ua: \(ua ?? "nil")")
++            return (ci, ua)
++        } catch {
++            debugLog("[AnisetteProvider] /v3/client_info failed: \(error)")
++            return (nil, nil)
+         }
+     }
+ 
+     private static func fetchRemote(handler: AnisetteServerHandler? = nil) async throws -> ALTAnisetteData {
+-        let serverUrlStrings = await AnisetteServersManager.shared.getActiveServerURLs()
+-        let servers = serverUrlStrings.compactMap { URL(string: $0) }
+-        guard !servers.isEmpty else {
++        let items = await AnisetteServersManager.shared.loadLocalServers()
++        var serverUrlStrings = items.filter { !$0.isHidden }.map(\.address)
++        var serverNames: [String: String] = [:]
++        for item in items {
++            serverNames[normalized(item.address)] = item.name
++        }
++
++        // Ensure SideInstaller Mac extras exist even if community list omits them
++        let extras = [
++            ("SideStore (New)", "https://new.ani.sidestore.io"),
++            ("jkcoxson (Mac ADI)", "https://mac-ani.jkcoxson.com"),
++            ("iLoader (Mac ADI)", "https://ani.iloader.app"),
++            ("StikStore (Mac ADI)", "https://ani3.stikstore.app"),
++            ("StikStore 2 (Mac ADI)", "https://ani2.stikstore.app"),
++        ]
++        for (name, addr) in extras {
++            if !serverUrlStrings.contains(where: { normalized($0) == normalized(addr) }) {
++                serverUrlStrings.append(addr)
++                serverNames[normalized(addr)] = name
++            }
++        }
++
++        guard !serverUrlStrings.isEmpty else {
++            throw AnisetteError.noServersConfigured
++        }
++
++        let pick = UserDefaults.standard.menuAnisetteURL.isEmpty
++            ? fallbackServerURL
++            : UserDefaults.standard.menuAnisetteURL
++
++        // SideInstaller Auto ON → candidates(); OFF → only the pick
++        let orderedStrings: [String]
++        if isAutoEnabled {
++            orderedStrings = candidates(
++                pick: pick,
++                servers: serverUrlStrings,
++                serverNames: serverNames,
++                failing: RecentFailures.addresses()
++            )
++            // Allow trying the full Mac candidate list
++            UserDefaults.standard.disableAnisetteRotation = false
++        } else {
++            orderedStrings = [pick]
++        }
++
++        let ordered = orderedStrings.compactMap { URL(string: $0) }
++        guard !ordered.isEmpty else {
+             throw AnisetteError.noServersConfigured
+         }
+ 
+-        let lastServer = UserDefaults.standard.menuAnisetteURL
+-        let startIndex = servers.firstIndex(where: { $0.absoluteString == lastServer }) ?? 0
++        let startIndex = 0
++        let activeServer = ordered[startIndex]
++        debugLog("[AnisetteProvider] Auto=\(isAutoEnabled) ordered=\(ordered.map { $0.host ?? $0.absoluteString })")
++
++        let advertised = await fetchServerClientInfo(from: activeServer)
++        let resolved = clientInfoToUse(advertisedClientInfo: advertised.clientInfo, advertisedUserAgent: advertised.userAgent)
++        debugLog("[AnisetteProvider] Using clientInfo=\(resolved.clientInfo) ua=\(resolved.userAgent) server=\(activeServer.absoluteString)")
+ 
+         let provider = SideSign.AnisetteDataManager.shared
+         let existingBlob = AnisetteConfigManager.shared.anisetteAdiBlob.flatMap { Data(base64Encoded: $0) }
+         let identifier = await AnisetteConfigManager.shared.resolveDeviceIdentifier()
+-        let headers = await AnisetteConfigManager.shared.makeRequestHeaders()
++        var headers = await AnisetteConfigManager.shared.makeRequestHeaders()
++        if !resolved.clientInfo.isEmpty {
++            headers.clientInfo = resolved.clientInfo
++        }
++        if !resolved.userAgent.isEmpty {
++            headers.userAgent = resolved.userAgent
++        }
++
++        // SideSignHeaders.GrandSlam / AppleAuth only expose userAgent (not clientInfo).
++        // Client-info goes on the anisette headers + ALTAnisetteData below.
++        var gsConfig = await SideSignConfigManager.shared.loadConfig()
++        if !resolved.userAgent.isEmpty {
++            gsConfig.grandSlam.userAgent = resolved.userAgent
++            gsConfig.appleAuth.userAgent = resolved.userAgent
++        }
++        DeveloperPortal.shared.customHeaders = SideSignConfigManager.sanitizeForGrandSlam(gsConfig)
+ 
+         let (anisetteData, newAdiBlob) = try await provider.fetchAnisetteDataWithFailover(
+-            servers: UserDefaults.standard.disableAnisetteRotation ? [servers[startIndex]] : servers,
++            servers: isAutoEnabled ? ordered : [ordered[startIndex]],
+             startIndex: startIndex,
+             identifier: identifier,
+             existingAdiBlob: existingBlob,
+             headers: headers,
+             onError: { error in
++                let s = "\(error)"
++                let lower = s.lowercased()
++                RecentFailures.record(activeServer.absoluteString, error: s)
++                if lower.contains("-45061") || lower.contains("not provisioned") || lower.contains("-80045")
++                    || lower.contains("-80046") || lower.contains("503") || lower.contains("could not connect") {
++                    debugLog("[AnisetteProvider] ADI/auth error — purging adi.pb")
++                    AnisetteConfigManager.shared.anisetteAdiBlob = nil
++                }
+                 if let anisetteError = error as? SideSign.AnisetteError,
+                    case .outdatedV1Server(let serverURL, _) = anisetteError {
+                     if UserDefaults.standard.defaultServerURL == serverURL.absoluteString {
+@@ -59,6 +322,7 @@ enum AnisetteProvider {
+             },
+             onSuccess: { successfulServer in
+                 UserDefaults.standard.menuAnisetteURL = successfulServer.absoluteString
++                RecentFailures.clear(successfulServer.absoluteString)
+                 debugLog("[AnisetteProvider] Successfully fetched Anisette data from \(successfulServer.absoluteString)")
+             }
+         )
+@@ -67,6 +331,9 @@ enum AnisetteProvider {
+             AnisetteConfigManager.shared.anisetteAdiBlob = freshBlob.base64EncodedString()
+         }
+ 
+-        return anisetteData
++        var data = anisetteData
++        data.clientInfo = resolved.clientInfo
++        data.userAgent = resolved.userAgent
++        return data
+     }
+ }
+diff --git a/SideStore/Core/Auth/SideSignConfigManager.swift b/SideStore/Core/Auth/SideSignConfigManager.swift
+index 4289e23..dc28c65 100644
+--- a/SideStore/Core/Auth/SideSignConfigManager.swift
++++ b/SideStore/Core/Auth/SideSignConfigManager.swift
+@@ -11,68 +11,100 @@ import SideSign
+ 
+ public actor SideSignConfigManager {
+     public static let shared = SideSignConfigManager()
+-    
++
++    /// SideInstaller-style: Windows GSA UA (not Mac/Xcode). Required so
++    /// X-MMe-Client-Info (Windows) and User-Agent match on GrandSlam.
++    public nonisolated static func windowsAuthHeaders() -> SideSignHeaders {
++        var h = SideSignHeaders()
++        h.grandSlam = .init(
++            service: "iCloud",
++            headerVersion: "1.0.1",
++            authApp: "com.apple.gs.xcode.auth",
++            userAgent: "akd/1.0 CFNetwork/808.1.4"
++        )
++        h.appleAuth = .init(
++            appIDKey: h.appleAuth.appIDKey,
++            userAgent: "akd/1.0 CFNetwork/808.1.4"
++        )
++        return h
++    }
++
++    /// Force Windows/akd UA on GrandSlam (SideInstaller base_headers)
++    public nonisolated static func sanitizeForGrandSlam(_ config: SideSignHeaders) -> SideSignHeaders {
++        var c = config
++        if c.grandSlam.userAgent.isEmpty || c.grandSlam.userAgent.contains("Macintosh")
++            || c.grandSlam.userAgent.contains("Xcode") || c.grandSlam.userAgent.contains("authKit") {
++            c.grandSlam.userAgent = "akd/1.0 CFNetwork/808.1.4"
++        }
++        if c.appleAuth.userAgent.isEmpty || c.appleAuth.userAgent.contains("Macintosh")
++            || c.appleAuth.userAgent.contains("Mac OS") {
++            c.appleAuth.userAgent = "akd/1.0 CFNetwork/808.1.4"
++        }
++        return c
++    }
++
+     private nonisolated var configFileURL: URL {
+-        let libraryDirectory = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+-        return libraryDirectory.appendingPathComponent("sidesign-config.json")
++        FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
++            .appendingPathComponent("sidesign-config.json")
+     }
+-    
++
+     public func loadConfig() -> SideSignHeaders {
+         if let data = try? Data(contentsOf: configFileURL),
+-           let config = try? Foundation.JSONDecoder().decode(SideSignHeaders.self, from: data) {
++           var config = try? JSONDecoder().decode(SideSignHeaders.self, from: data) {
++            config = Self.sanitizeForGrandSlam(config)
+             DeveloperPortal.shared.customHeaders = config
+             return config
+         }
+-        let defaultConfig = SideSignHeaders()
+-        DeveloperPortal.shared.customHeaders = defaultConfig
+-        return defaultConfig
++        let cfg = Self.windowsAuthHeaders()
++        DeveloperPortal.shared.customHeaders = cfg
++        return cfg
+     }
+-    
++
+     public nonisolated func applyConfigToDeveloperPortal() {
+         if let data = try? Data(contentsOf: configFileURL),
+-           let config = try? Foundation.JSONDecoder().decode(SideSignHeaders.self, from: data) {
++           var config = try? JSONDecoder().decode(SideSignHeaders.self, from: data) {
++            config = Self.sanitizeForGrandSlam(config)
+             DeveloperPortal.shared.customHeaders = config
+         } else {
+-            DeveloperPortal.shared.customHeaders = SideSignHeaders()
++            DeveloperPortal.shared.customHeaders = Self.windowsAuthHeaders()
+         }
+     }
+-    
++
+     public func saveConfig(_ config: SideSignHeaders) {
+-        let encoder = Foundation.JSONEncoder()
+-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+-        if let data = try? encoder.encode(config) {
++        let enc = JSONEncoder()
++        enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
++        if let data = try? enc.encode(config) {
+             try? data.write(to: configFileURL, options: .atomic)
+         }
+         DeveloperPortal.shared.customHeaders = config
+     }
+-    
++
+     public func importFromFile(url: URL) throws -> SideSignHeaders {
+         let data = try Data(contentsOf: url)
+-        let config = try Foundation.JSONDecoder().decode(SideSignHeaders.self, from: data)
++        let config = try JSONDecoder().decode(SideSignHeaders.self, from: data)
+         saveConfig(config)
+         return config
+     }
+-    
++
+     public func exportConfigData() -> Data? {
+-        let config = loadConfig()
+-        let encoder = Foundation.JSONEncoder()
+-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+-        return try? encoder.encode(config)
++        let enc = JSONEncoder()
++        enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
++        return try? enc.encode(loadConfig())
+     }
+-    
++
+     @discardableResult
+     public nonisolated func resetToDefaults() -> SideSignHeaders {
+-        deleteConfigFile()
+-        let defaultConfig = SideSignHeaders()
+-        DeveloperPortal.shared.customHeaders = defaultConfig
+-        return defaultConfig
++        try? FileManager.default.removeItem(at: configFileURL)
++        let cfg = Self.windowsAuthHeaders()
++        DeveloperPortal.shared.customHeaders = cfg
++        return cfg
+     }
+-    
++
+     public nonisolated func deleteConfigFile() {
+         try? FileManager.default.removeItem(at: configFileURL)
+     }
+-    
++
+     public nonisolated func hasConfigFile() -> Bool {
+-        return FileManager.default.fileExists(atPath: configFileURL.path)
++        FileManager.default.fileExists(atPath: configFileURL.path)
+     }
+ }
+diff --git a/SideStore/Core/Operations/StandaloneOperations/SignInOperation.swift b/SideStore/Core/Operations/StandaloneOperations/SignInOperation.swift
+index 1ff9135..beb31b8 100644
+--- a/SideStore/Core/Operations/StandaloneOperations/SignInOperation.swift
++++ b/SideStore/Core/Operations/StandaloneOperations/SignInOperation.swift
+@@ -137,6 +137,22 @@ final class SignInOperation: BaseStandaloneOperation<StandaloneOperationContext,
+                 return (account, session)
+             } catch {
+                 self.debugLog("[SignInOperation] authenticationLoop: Attempt failed with error: \(error)")
++                // SideInstaller / PR#1660: purge Mac/desynced adi.pb on auth failures so next
++                // attempt provisions a fresh Windows identity matching client-info.
++                let errorString = "\(error)".lowercased()
++                if errorString.contains("-80045")
++                    || errorString.contains("-45061")
++                    || errorString.contains("-22421")
++                    || errorString.contains("-90010")
++                    || errorString.contains("could not connect to icloud")
++                    || errorString.contains("invalid anisette")
++                    || errorString.contains("429")
++                    || errorString.contains("too many requests")
++                    || errorString.contains("503")
++                    || errorString.contains("this action cannot be completed") {
++                    self.debugLog("[SignInOperation] Auth failure — purging adi.pb for fresh Windows provisioning")
++                    AnisetteConfigManager.shared.anisetteAdiBlob = nil
++                }
+                 await handler.handleSignInResult(.failure(error))
+             }
+         }
+@@ -144,6 +160,8 @@ final class SignInOperation: BaseStandaloneOperation<StandaloneOperationContext,
+     
+     private func signIn(appleID: String, password: String) async throws -> (ALTAccount, ALTAppleAPISession) {
+         self.appleIDEmailAddress = appleID
++
++        SideSignConfigManager.shared.applyConfigToDeveloperPortal()
+         
+         let anisetteData = try await self.getAnisetteData()
+         let handler = self.signInHandler
+@@ -199,7 +217,7 @@ final class SignInOperation: BaseStandaloneOperation<StandaloneOperationContext,
+                 reportProgress(stepWeight * 3)
+             } else {
+                 self.debugLog("[SignInOperation] Device registration skipped by user.")
+-                await self.signInHandler.showDeviceRegistrationSkipAcknowledgment()
++               await self.signInHandler.showDeviceRegistrationSkipAcknowledgment()
+             }
+         }
+ 
+@@ -217,7 +235,7 @@ final class SignInOperation: BaseStandaloneOperation<StandaloneOperationContext,
+             case .failure(let error):
+                 self.debugLog("[SignInOperation] finalizeAuthentication: Failure result - \(error.localizedDescription)")
+                 await self.signInHandler.complete()
+-                self.verboseLog("[SignInOperation] finalizeAuthentication: invoked auth complete for .failure case...")
++               self.verboseLog("[SignInOperation] finalizeAuthentication: invoked auth complete for .failure case...")
+                 
+             case .success(let result):
+                 let team = result.team
+@@ -228,7 +246,7 @@ final class SignInOperation: BaseStandaloneOperation<StandaloneOperationContext,
+                 
+                 var didResign = false
+                 if !self.skipResign,
+-                   let signingCertificate = certificate,
++                    let signingCertificate = certificate,
+                    !self.skipCertificateProvisioning,
+                    UserDefaults.standard.isDeviceRegistered
+                 {

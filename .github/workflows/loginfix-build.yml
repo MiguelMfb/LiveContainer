@@ -1,0 +1,71 @@
+name: LoginFix experimental build
+on:
+  push:
+    branches: [loginfix-1683]
+    paths: ['loginfix/**', '.github/workflows/loginfix-build.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sidestore:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: '26.4'
+      - name: Fetch pinned LiveContainerSupport source
+        run: |
+          git clone https://github.com/LiveContainer/SideStore.git SideStore
+          git -C SideStore checkout ee3cc16a67f9fed766f79a0ed70938f0f8ad5a07
+          git -C SideStore submodule update --init --recursive
+          cp loginfix/tests/LoginFixTests.swift SideStore/Dependencies/SideSign/Tests/SideSignTests/
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            SideStore/Dependencies/SideSign/.build
+          key: loginfix-sidesign-26.4-v1
+      - name: Confirm regression on original SideSign
+        shell: bash
+        run: |
+          set +e
+          cd SideStore/Dependencies/SideSign
+          swift test --filter 'LoginFixTests.currentMacIdentity' > ../../../baseline-test.log 2>&1
+          status=$?
+          cd ../../..
+          cat baseline-test.log
+          test "$status" -ne 0 || exit 1
+          grep -q 'Expectation failed' baseline-test.log || exit 1
+          grep -q 'currentMacIdentity' baseline-test.log || exit 1
+      - name: Apply pinned authentication changes
+        run: |
+          git -C SideStore apply ../loginfix/sidestore.patch
+          git -C SideStore/Dependencies/SideSign remote add loginfix https://github.com/Mr3242-Scripter/SideSign.git
+          git -C SideStore/Dependencies/SideSign fetch loginfix bfb637d939f8e36a92e6ca96f70e412f89d2b716
+          git -C SideStore/Dependencies/SideSign checkout bfb637d939f8e36a92e6ca96f70e412f89d2b716
+          python3 loginfix/configure.py SideStore
+      - name: Test patched SideSign
+        working-directory: SideStore/Dependencies/SideSign
+        run: swift test
+      - name: Build unsigned SideStore
+        working-directory: SideStore
+        run: |
+          brew install ldid
+          set -o pipefail
+          make build > ../sidestore-build.log 2>&1 || { tail -n 180 ../sidestore-build.log; exit 1; }
+          make fakesign ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SideStore-LoginFix
+          path: SideStore/SideStore.ipa
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: LoginFix-build-evidence
+          path: |
+            baseline-test.log
+            sidestore-build.log
+          retention-days: 1
