@@ -69,3 +69,40 @@ jobs:
             baseline-test.log
             sidestore-build.log
           retention-days: 1
+  package:
+    needs: sidestore
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: '26.4'
+      - uses: actions/download-artifact@v4
+        with:
+          name: SideStore-LoginFix
+          path: compiled
+      - name: Fetch verified public LiveContainer base
+        run: |
+          curl -fL 'https://github.com/LiveContainer/LiveContainer/releases/download/nightly/LiveContainer%2BSideStore.ipa' -o base.ipa
+          echo '33831bb279d74f2da1be08eb3cc6d3646992a6120da32ffb763269696052b868  base.ipa' | shasum -a 256 -c -
+      - name: Build pinned upstream dylibify
+        run: |
+          git clone https://github.com/LiveContainer/dylibify.git dylibify
+          git -C dylibify checkout 5daf713df9fb07724510490c88aa8e00061be14a
+          cd dylibify
+          sh make.sh
+      - name: Run portable packaging regression tests
+        env:
+          LOGIN_FIX_BASE_IPA: ${{ github.workspace }}/base.ipa
+        run: python3 -m unittest discover -s loginfix/tests -p 'test_*.py' -v
+      - name: Package and verify the single experimental IPA
+        run: |
+          python3 loginfix/package.py base.ipa compiled/SideStore.ipa dylibify/dylibify LiveContainer-SideStore-LoginFix-experimental.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LoginFix-Experimental
+          path: |
+            LiveContainer-SideStore-LoginFix-experimental.ipa
+            LiveContainer-SideStore-LoginFix-experimental.verification.json
+          retention-days: 1

@@ -1,1 +1,3 @@
+loginfix/** text eol=lf
 loginfix/*.patch -whitespace
+.github/workflows/loginfix-* text eol=lf

@@ -4,5 +4,7 @@
   "sidestore_pr_1683": "3d9fcb68f6c4819269fb7836db590c4fda2efd84",
   "sidesign_pr_submodule": "ac3df50c2e55a409b217eec7f14c8949f77365f1",
   "sidesign_reviewed_update": "bfb637d939f8e36a92e6ca96f70e412f89d2b716",
-  "device_modifications": false
+  "device_modifications": false,
+  "dylibify": "5daf713df9fb07724510490c88aa8e00061be14a",
+  "official_combined_base_sha256": "33831bb279d74f2da1be08eb3cc6d3646992a6120da32ffb763269696052b868"
 }
